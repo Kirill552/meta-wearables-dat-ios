@@ -10,10 +10,12 @@ workflows:
     scripts:
       - name: Show Xcode version
         script: |
+          set -euo pipefail
           xcodebuild -version
 
       - name: Resolve Swift packages
         script: |
+          set -euo pipefail
           cd "$CM_BUILD_DIR/samples/CameraAccess"
           xcodebuild -resolvePackageDependencies \
             -project CameraAccess.xcodeproj \
@@ -21,6 +23,7 @@ workflows:
 
       - name: Build CameraAccess for physical iPhone without signing
         script: |
+          set -euo pipefail
           cd "$CM_BUILD_DIR/samples/CameraAccess"
           xcodebuild build \
             -project CameraAccess.xcodeproj \
@@ -31,17 +34,60 @@ workflows:
             -derivedDataPath "$CM_BUILD_DIR/build" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            DEVELOPMENT_TEAM=""
+            DEVELOPMENT_TEAM="" \
+            CURRENT_PROJECT_VERSION=2
+
+      - name: Verify packaged transport configuration (BT1)
+        script: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import plistlib
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["CM_BUILD_DIR"])
+          app = root / "build/Build/Products/Release-iphoneos/CameraAccess.app"
+          with (app / "Info.plist").open("rb") as stream:
+              info = plistlib.load(stream)
+          modes = info.get("UIBackgroundModes", [])
+          protocols = info.get("UISupportedExternalAccessoryProtocols", [])
+          checks = {
+              "external-accessory background mode": "external-accessory" in modes,
+              "Meta accessory protocol": "com.meta.ar.wearable" in protocols,
+              "Bluetooth central": "bluetooth-central" in modes,
+              "Bluetooth peripheral": "bluetooth-peripheral" in modes,
+              "Local network description": bool(info.get("NSLocalNetworkUsageDescription")),
+              "Bonjour protocol": "_bonjour._tcp" in info.get("NSBonjourServices", []),
+              "BT1 diagnostic build": info.get("CameraAccessDiagnosticBuild") == "BT1",
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit("Missing packaged configuration: " + ", ".join(failed))
+          commit = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], cwd=root, text=True
+          ).strip()
+          report = "CameraAccess BT1\nCommit: " + commit + "\n"
+          report += "\n".join(name + ": OK" for name in checks) + "\n"
+          artifacts = root / "artifacts"
+          artifacts.mkdir(exist_ok=True)
+          (artifacts / "CameraAccess-build-info.txt").write_text(report, encoding="utf-8")
+          print(report)
+          PY
 
       - name: Package unsigned IPA
         script: |
+          set -euo pipefail
           APP_PATH="$CM_BUILD_DIR/build/Build/Products/Release-iphoneos/CameraAccess.app"
           test -d "$APP_PATH"
           mkdir -p "$CM_BUILD_DIR/artifacts/Payload"
           cp -R "$APP_PATH" "$CM_BUILD_DIR/artifacts/Payload/"
           cd "$CM_BUILD_DIR/artifacts"
           /usr/bin/zip -qry CameraAccess-unsigned.ipa Payload
+          shasum -a 256 CameraAccess-unsigned.ipa > CameraAccess-unsigned.ipa.sha256
 
     artifacts:
       - artifacts/CameraAccess-unsigned.ipa
+      - artifacts/CameraAccess-unsigned.ipa.sha256
+      - artifacts/CameraAccess-build-info.txt
       - build/Build/Products/Release-iphoneos/CameraAccess.app
