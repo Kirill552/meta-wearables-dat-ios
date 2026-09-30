@@ -1,0 +1,47 @@
+workflows:
+  camera-access-unsigned:
+    name: Meta CameraAccess unsigned iOS build
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      xcode: 26.4
+
+    scripts:
+      - name: Show Xcode version
+        script: |
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        script: |
+          cd "$CM_BUILD_DIR/samples/CameraAccess"
+          xcodebuild -resolvePackageDependencies \
+            -project CameraAccess.xcodeproj \
+            -scheme CameraAccess
+
+      - name: Build CameraAccess for physical iPhone without signing
+        script: |
+          cd "$CM_BUILD_DIR/samples/CameraAccess"
+          xcodebuild build \
+            -project CameraAccess.xcodeproj \
+            -scheme CameraAccess \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$CM_BUILD_DIR/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package unsigned IPA
+        script: |
+          APP_PATH="$CM_BUILD_DIR/build/Build/Products/Release-iphoneos/CameraAccess.app"
+          test -d "$APP_PATH"
+          mkdir -p "$CM_BUILD_DIR/artifacts/Payload"
+          cp -R "$APP_PATH" "$CM_BUILD_DIR/artifacts/Payload/"
+          cd "$CM_BUILD_DIR/artifacts"
+          /usr/bin/zip -qry CameraAccess-unsigned.ipa Payload
+
+    artifacts:
+      - artifacts/CameraAccess-unsigned.ipa
+      - build/Build/Products/Release-iphoneos/CameraAccess.app
