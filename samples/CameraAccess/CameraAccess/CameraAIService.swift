@@ -172,7 +172,7 @@ private final class CameraAILiveSession {
           try await self.sendJSON(videoMessage)
           try await self.sendJSON(textMessage)
         } catch {
-          self.finishResponse(with: .failure(CameraAIServiceError.liveResponse))
+          self?.finishResponse(with: .failure(CameraAIServiceError.liveResponse))
         }
       }
     }
