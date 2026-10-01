@@ -213,10 +213,9 @@ private final class CameraAILiveSession {
     let setup: [String: Any] = [
       "setup": [
         "model": model,
-        // The current raw WebSocket guide places responseModalities directly on setup.
-        // Native audio models support AUDIO and expose readable text through the
-        // outputAudioTranscription field below.
-        "responseModalities": ["AUDIO"],
+        // The constrained Live endpoint requires responseModalities inside
+        // generationConfig. Native audio models also provide output transcription.
+        "generationConfig": ["responseModalities": ["AUDIO"]],
         "systemInstruction": [
           "parts": [["text": instruction]],
         ],
