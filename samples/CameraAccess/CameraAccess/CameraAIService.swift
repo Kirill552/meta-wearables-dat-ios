@@ -511,6 +511,10 @@ final class CameraAIViewModel {
       status = "error: Bluetooth HFP microphone is unavailable"
       return
     }
+    guard await AVAudioApplication.requestRecordPermission() else {
+      status = "error: microphone permission denied"
+      return
+    }
 
     isBusy = true
     transcript = ""
