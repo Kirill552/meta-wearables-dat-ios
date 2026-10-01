@@ -3,13 +3,27 @@ import Security
 import SwiftUI
 
 enum CameraAISettingsStore {
+  enum TranslationVoice: String, CaseIterable, Identifiable {
+    case gemini
+    case ios
+
+    var id: String { rawValue }
+    var label: String { self == .gemini ? "Голос Gemini" : "Голос iPhone" }
+  }
+
   static let defaultGatewayURL = "https://rayban-api.outlookpowertools.com"
   private static let urlKey = "cameraAI.gatewayURL"
+  private static let translationVoiceKey = "cameraAI.translationVoice"
   private static let keychainService = "CameraAccess.Gateway"
   private static let keychainAccount = "accessToken"
 
   static var gatewayURLString: String {
     UserDefaults.standard.string(forKey: urlKey) ?? defaultGatewayURL
+  }
+
+  static var translationVoice: TranslationVoice {
+    get { TranslationVoice(rawValue: UserDefaults.standard.string(forKey: translationVoiceKey) ?? "") ?? .gemini }
+    set { UserDefaults.standard.set(newValue.rawValue, forKey: translationVoiceKey) }
   }
 
   static var gatewayURL: URL? {
@@ -70,6 +84,7 @@ struct CameraAISettingsView: View {
   @Environment(\.dismiss) private var dismiss
   @State private var gatewayURL = CameraAISettingsStore.gatewayURLString
   @State private var accessToken = ""
+  @State private var translationVoice = CameraAISettingsStore.translationVoice
   @State private var message = ""
 
   var body: some View {
@@ -87,6 +102,16 @@ struct CameraAISettingsView: View {
             .font(.footnote)
             .foregroundStyle(.secondary)
         }
+        Section("Переводчик") {
+          Picker("Голос", selection: $translationVoice) {
+            ForEach(CameraAISettingsStore.TranslationVoice.allCases) { voice in
+              Text(voice.label).tag(voice)
+            }
+          }
+          Text("Gemini звучит естественнее; если звук не слышен в очках, выберите голос iPhone.")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
         if !message.isEmpty {
           Text(message).foregroundStyle(.red)
         }
@@ -99,6 +124,7 @@ struct CameraAISettingsView: View {
         ToolbarItem(placement: .topBarTrailing) {
           Button("Сохранить") {
             if CameraAISettingsStore.save(urlString: gatewayURL, token: accessToken) {
+              CameraAISettingsStore.translationVoice = translationVoice
               dismiss()
             } else {
               message = "Проверьте HTTPS URL или доступ к Keychain."

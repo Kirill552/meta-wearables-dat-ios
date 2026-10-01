@@ -406,12 +406,64 @@ private final class CameraAIAudioOutput {
     if !engine.isRunning { try engine.start() }
   }
 
-  private static func sampleRate(from mimeType: String) -> Double {
+  static func sampleRate(from mimeType: String) -> Double {
     guard let ratePart = mimeType.split(separator: ";").first(where: { $0.contains("rate=") }),
           let value = ratePart.split(separator: "=").last,
           let rate = Double(value)
     else { return 24_000 }
     return rate > 0 ? rate : 24_000
+  }
+}
+
+/// Plays a complete Gemini speech turn as a WAV in the active Bluetooth route.
+/// AVAudioPlayer uses the app's audio session, independently of the microphone
+/// capture engine. Keep the player alive until playback completes.
+@MainActor
+private final class CameraAIBufferedAudioOutput {
+  private var player: AVAudioPlayer?
+
+  var isPlaying: Bool { player?.isPlaying == true }
+
+  func play(pcm: Data, sampleRate: Double) throws {
+    guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
+          pcm.count <= Int(UInt32.max) - 36,
+          sampleRate >= 8_000, sampleRate <= 48_000
+    else { throw CameraAIServiceError.audioPlayback }
+
+    let rate = UInt32(sampleRate.rounded())
+    func u16(_ value: UInt16) -> [UInt8] {
+      [UInt8(truncatingIfNeeded: value), UInt8(truncatingIfNeeded: value >> 8)]
+    }
+    func u32(_ value: UInt32) -> [UInt8] {
+      [UInt8(truncatingIfNeeded: value), UInt8(truncatingIfNeeded: value >> 8),
+       UInt8(truncatingIfNeeded: value >> 16), UInt8(truncatingIfNeeded: value >> 24)]
+    }
+    var wav = Data()
+    wav.append(contentsOf: "RIFF".utf8)
+    wav.append(contentsOf: u32(UInt32(pcm.count + 36)))
+    wav.append(contentsOf: "WAVEfmt ".utf8)
+    wav.append(contentsOf: u32(16))
+    wav.append(contentsOf: u16(1)) // PCM
+    wav.append(contentsOf: u16(1)) // mono
+    wav.append(contentsOf: u32(rate))
+    wav.append(contentsOf: u32(rate * 2))
+    wav.append(contentsOf: u16(2)) // frame alignment
+    wav.append(contentsOf: u16(16)) // bits per sample
+    wav.append(contentsOf: "data".utf8)
+    wav.append(contentsOf: u32(UInt32(pcm.count)))
+    wav.append(pcm)
+
+    let newPlayer = try AVAudioPlayer(data: wav)
+    newPlayer.volume = 1
+    guard newPlayer.prepareToPlay(), newPlayer.play() else {
+      throw CameraAIServiceError.audioPlayback
+    }
+    player = newPlayer
+  }
+
+  func stop() {
+    player?.stop()
+    player = nil
   }
 }
 
@@ -430,11 +482,15 @@ final class CameraAIViewModel {
 
   @ObservationIgnored private let audioInput = AudioInputHandler()
   @ObservationIgnored private let audioOutput = CameraAIAudioOutput()
+  @ObservationIgnored private let translatedAudioOutput = CameraAIBufferedAudioOutput()
   @ObservationIgnored private let speechSynthesizer = AVSpeechSynthesizer()
   @ObservationIgnored private var liveSession: CameraAILiveSession?
   @ObservationIgnored private var hasMicrophoneFrames = false
   @ObservationIgnored private var hasReceivedAudio = false
   @ObservationIgnored private var currentTurnTranscript = ""
+  @ObservationIgnored private var translatedAudio = Data()
+  @ObservationIgnored private var translatedAudioRate = 24_000.0
+  @ObservationIgnored private var translatedAudioOverflow = false
   @ObservationIgnored private var isSpeakingTranslation = false
   @ObservationIgnored private var speechTurn = 0
 
@@ -472,6 +528,7 @@ final class CameraAIViewModel {
     audioInput.stopListening()
     audioInput.cleanup()
     audioOutput.stop()
+    translatedAudioOutput.stop()
   }
 
   /// Sends exactly one JPEG frame from the existing DAT preview to Gemini Live.
@@ -490,6 +547,8 @@ final class CameraAIViewModel {
     transcript = ""
     hasReceivedAudio = false
     currentTurnTranscript = ""
+    translatedAudio.removeAll()
+    translatedAudioOverflow = false
     isSpeakingTranslation = false
     status = "requesting token"
     do {
@@ -543,6 +602,8 @@ final class CameraAIViewModel {
     hasMicrophoneFrames = false
     hasReceivedAudio = false
     currentTurnTranscript = ""
+    translatedAudio.removeAll()
+    translatedAudioOverflow = false
     isSpeakingTranslation = false
     status = "requesting token"
     do {
@@ -630,10 +691,16 @@ final class CameraAIViewModel {
     case .inputText:
       if isTranslating { status = "listening" }
     case .audio(let data, let mimeType):
-      // During translation use the Russian output transcript for local speech.
-      // The Live audio buffers can be accepted by AVAudioEngine while remaining
-      // inaudible on the simultaneous Bluetooth HFP input/output route.
-      if isTranslating { break }
+      if isTranslating {
+        let rate = CameraAIAudioOutput.sampleRate(from: mimeType)
+        if translatedAudio.isEmpty { translatedAudioRate = rate }
+        if rate != translatedAudioRate || translatedAudio.count + data.count > 4_000_000 {
+          translatedAudioOverflow = true
+        } else if !translatedAudioOverflow {
+          translatedAudio.append(data)
+        }
+        break
+      }
       do {
         routeDescription = Self.audioRouteDescription()
         try audioOutput.play(data: data, mimeType: mimeType)
@@ -644,18 +711,32 @@ final class CameraAIViewModel {
       }
     case .turnComplete:
       if isTranslating {
-        if !currentTurnTranscript.isEmpty {
+        var voice = ""
+        if CameraAISettingsStore.translationVoice == .gemini,
+           !translatedAudioOverflow, !translatedAudio.isEmpty {
+          do {
+            try translatedAudioOutput.play(pcm: translatedAudio, sampleRate: translatedAudioRate)
+            voice = "Gemini voice"
+          } catch {
+            translatedAudioOutput.stop()
+          }
+        }
+        if voice.isEmpty && !currentTurnTranscript.isEmpty {
           let utterance = AVSpeechUtterance(string: currentTurnTranscript)
-          utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
+          utterance.voice = Self.bestRussianVoice()
+          speechSynthesizer.speak(utterance)
+          voice = "iOS voice"
+        }
+        if !voice.isEmpty {
           isSpeakingTranslation = true
           speechTurn += 1
           let turn = speechTurn
-          speechSynthesizer.speak(utterance)
-          status = "speaking (iOS voice)"
+          status = "speaking (\(voice))"
           Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
             guard let self else { return }
-            while self.isTranslating && self.speechTurn == turn && self.speechSynthesizer.isSpeaking {
+            while self.isTranslating && self.speechTurn == turn &&
+                  (self.speechSynthesizer.isSpeaking || self.translatedAudioOutput.isPlaying) {
               try? await Task.sleep(for: .milliseconds(150))
             }
             if self.isTranslating && self.speechTurn == turn {
@@ -667,10 +748,12 @@ final class CameraAIViewModel {
           status = "listening"
         }
         currentTurnTranscript = ""
+        translatedAudio.removeAll()
+        translatedAudioOverflow = false
         hasReceivedAudio = false
       } else if !hasReceivedAudio, !transcript.isEmpty {
         let utterance = AVSpeechUtterance(string: transcript)
-        utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
+        utterance.voice = Self.bestRussianVoice()
         speechSynthesizer.speak(utterance)
         status = "speaking"
       } else if !isTranslating {
@@ -678,6 +761,7 @@ final class CameraAIViewModel {
       }
     case .interrupted:
       audioOutput.stop()
+      translatedAudioOutput.stop()
     }
   }
 
@@ -694,13 +778,30 @@ final class CameraAIViewModel {
     }
   }
 
+  private static func bestRussianVoice() -> AVSpeechSynthesisVoice? {
+    func quality(_ voice: AVSpeechSynthesisVoice) -> Int {
+      switch voice.quality {
+      case .premium: return 3
+      case .enhanced: return 2
+      default: return 1
+      }
+    }
+    return AVSpeechSynthesisVoice.speechVoices()
+      .filter { $0.language.hasPrefix("ru") }
+      .max { quality($0) < quality($1) }
+      ?? AVSpeechSynthesisVoice(language: "ru-RU")
+  }
+
   private func stopTranslationResources() {
     isTranslating = false
     isSpeakingTranslation = false
     speechTurn += 1
+    translatedAudio.removeAll()
+    translatedAudioOverflow = false
     audioInput.stopListening()
     audioInput.cleanup()
     audioOutput.stop()
+    translatedAudioOutput.stop()
     speechSynthesizer.stopSpeaking(at: .immediate)
     liveSession?.close()
     liveSession = nil
