@@ -506,11 +506,6 @@ final class CameraAIViewModel {
       status = "gateway not configured"
       return
     }
-    guard Self.hasBluetoothHFPInput else {
-      routeDescription = Self.audioRouteDescription()
-      status = "error: Bluetooth HFP microphone is unavailable"
-      return
-    }
     guard await AVAudioApplication.requestRecordPermission() else {
       status = "error: microphone permission denied"
       return
@@ -521,8 +516,9 @@ final class CameraAIViewModel {
     hasMicrophoneFrames = false
     status = "requesting token"
     do {
-      let token = try await requestEphemeralToken()
       try configureAudioSession()
+      guard Self.hasBluetoothHFPInput else { throw CameraAIServiceError.noBluetoothInput }
+      let token = try await requestEphemeralToken()
       let session = try CameraAILiveSession(
         token: token.token,
         model: token.model,
@@ -570,7 +566,7 @@ final class CameraAIViewModel {
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-    request.httpBody = Data("{}".utf8)
+    request.httpBody = Data()
 
     let data: Data
     let response: URLResponse
