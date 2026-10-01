@@ -13,6 +13,8 @@ workflows:
 
     environment:
       xcode: 26.4
+      groups:
+        - meta_openvision
 
     scripts:
       - name: Show Xcode version
@@ -28,21 +30,57 @@ workflows:
             -project CameraAccess.xcodeproj \
             -scheme CameraAccess
 
+      - name: Prepare Meta integration configuration
+        script: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          values = {name: os.environ.get(name, "") for name in (
+              "META_APP_ID", "META_CLIENT_TOKEN", "META_TEAM_ID", "META_BUNDLE_ID"
+          )}
+          missing = [name for name, value in values.items() if not value]
+          if missing:
+              raise SystemExit("Missing Codemagic environment variables: " + ", ".join(missing))
+          if not re.fullmatch(r"[0-9]+", values["META_APP_ID"]):
+              raise SystemExit("META_APP_ID has an invalid format")
+          if not re.fullmatch(r"[A-Z0-9]{10}", values["META_TEAM_ID"]):
+              raise SystemExit("META_TEAM_ID has an invalid format")
+          if not re.fullmatch(r"[A-Za-z0-9.-]+", values["META_BUNDLE_ID"]):
+              raise SystemExit("META_BUNDLE_ID has an invalid format")
+          if not re.fullmatch(r"AR\|" + values["META_APP_ID"] + r"\|[A-Fa-f0-9]+", values["META_CLIENT_TOKEN"]):
+              raise SystemExit("META_CLIENT_TOKEN has an invalid format")
+          config = Path(os.environ["CM_BUILD_DIR"]) / "meta-integration.xcconfig"
+          config.write_text(
+              "META_APP_ID = " + values["META_APP_ID"] + "\n"
+              "CLIENT_TOKEN = " + values["META_CLIENT_TOKEN"] + "\n"
+              "DEVELOPMENT_TEAM = " + values["META_TEAM_ID"] + "\n"
+              "PRODUCT_BUNDLE_IDENTIFIER = " + values["META_BUNDLE_ID"] + "\n",
+              encoding="utf-8",
+          )
+          config.chmod(0o600)
+          print("Meta integration configuration prepared")
+          PY
+
       - name: Build CameraAccess for physical iPhone without signing
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR/samples/CameraAccess"
-          xcodebuild build \
+          xcodebuild build -quiet \
             -project CameraAccess.xcodeproj \
             -scheme CameraAccess \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$CM_BUILD_DIR/build" \
+            -xcconfig "$CM_BUILD_DIR/meta-integration.xcconfig" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            DEVELOPMENT_TEAM="" \
-            CURRENT_PROJECT_VERSION=10
+            DEVELOPMENT_TEAM="$META_TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$META_BUNDLE_ID" \
+            CURRENT_PROJECT_VERSION=11
 
       - name: Verify packaged transport configuration and AI build
         script: |
@@ -59,6 +97,7 @@ workflows:
               info = plistlib.load(stream)
           modes = info.get("UIBackgroundModes", [])
           protocols = info.get("UISupportedExternalAccessoryProtocols", [])
+          meta = info.get("MWDAT", {})
           checks = {
               "external-accessory background mode": "external-accessory" in modes,
               "Meta accessory protocol": "com.meta.ar.wearable" in protocols,
@@ -66,8 +105,12 @@ workflows:
               "Bluetooth peripheral": "bluetooth-peripheral" in modes,
               "Local network description": bool(info.get("NSLocalNetworkUsageDescription")),
               "Bonjour protocol": "_bonjour._tcp" in info.get("NSBonjourServices", []),
-              "AI8 diagnostic build": info.get("CameraAccessDiagnosticBuild") == "AI8",
-              "Build 10": info.get("CFBundleVersion") == "10",
+              "Meta application ID": meta.get("MetaAppID") == os.environ["META_APP_ID"],
+              "Meta client token": meta.get("ClientToken") == os.environ["META_CLIENT_TOKEN"],
+              "Apple team ID": meta.get("TeamID") == os.environ["META_TEAM_ID"],
+              "Registered bundle ID": info.get("CFBundleIdentifier") == os.environ["META_BUNDLE_ID"],
+              "AI9 diagnostic build": info.get("CameraAccessDiagnosticBuild") == "AI9",
+              "Build 11": info.get("CFBundleVersion") == "11",
           }
           failed = [name for name, ok in checks.items() if not ok]
           if failed:
@@ -75,7 +118,7 @@ workflows:
           commit = subprocess.check_output(
               ["git", "rev-parse", "HEAD"], cwd=root, text=True
           ).strip()
-          report = "CameraAccess AI8\nCommit: " + commit + "\n"
+          report = "CameraAccess AI9\nCommit: " + commit + "\n"
           report += "\n".join(name + ": OK" for name in checks) + "\n"
           artifacts = root / "artifacts"
           artifacts.mkdir(exist_ok=True)
