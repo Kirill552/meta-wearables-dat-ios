@@ -23,9 +23,11 @@ private let updateRequiredTitle = "Update required"
 
 struct CameraView: View {
   @State private var viewModel: CameraViewModel
+  @State private var ai = CameraAIViewModel()
   @Bindable var wearablesVM: WearablesViewModel
   @State private var showSettingsMenu: Bool = false
   @State private var isLaunchingUpdate: Bool = false
+  @State private var showAISettings = false
 
   init(wearables: WearablesInterface, wearablesVM: WearablesViewModel) {
     self._viewModel = State(wrappedValue: CameraViewModel(wearables: wearables))
@@ -103,6 +105,11 @@ struct CameraView: View {
       Text("To preview your glasses camera, you'll be taken to the Meta AI app to grant access, then returned here.")
     }
     .navigationBarHidden(true)
+    .sheet(isPresented: $showAISettings) { CameraAISettingsView() }
+    .onChange(of: viewModel.isSessionActive) { _, active in
+      if !active { Task { await ai.stopTranslation() } }
+    }
+    .onDisappear { Task { await ai.stopTranslation() } }
   }
 
   // MARK: - Preview background
@@ -229,6 +236,10 @@ struct CameraView: View {
       Spacer()
 
       // Top bar carries only the app-level settings/Disconnect control.
+      Button("AI Settings") { showAISettings = true }
+        .font(.system(size: 12, weight: .semibold))
+        .foregroundStyle(.white)
+        .accessibilityIdentifier("ai_settings_button")
       iconButton("gearshape", id: "settings_button") {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
           showSettingsMenu.toggle()
@@ -280,6 +291,9 @@ struct CameraView: View {
 
   private var bottomBar: some View {
     VStack(spacing: 14) {
+      if viewModel.isSessionActive {
+        aiControls
+      }
       if isUpdateRequired {
         updateControls
       } else {
@@ -297,6 +311,42 @@ struct CameraView: View {
       LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom)
         .edgesIgnoringSafeArea(.bottom)
     )
+  }
+
+  private var aiControls: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 10) {
+        Button("Что я вижу?") {
+          guard let frame = viewModel.currentVideoFrame else { return }
+          Task { await ai.ask(frame: frame) }
+        }
+        .disabled(!viewModel.isStreaming || !viewModel.hasReceivedFirstFrame || ai.isBusy || ai.isTranslating)
+        .accessibilityIdentifier("ai_vision_button")
+
+        Button(ai.isTranslating ? "Переводчик: Стоп" : "Переводчик: Старт") {
+          Task {
+            if ai.isTranslating { await ai.stopTranslation() }
+            else { await ai.startTranslation() }
+          }
+        }
+        .disabled(ai.isBusy || (!ai.isTranslating && viewModel.hasStream))
+        .accessibilityIdentifier("ai_translation_button")
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.small)
+
+      Text("AI: \(ai.status)")
+      if viewModel.hasStream && !ai.isTranslating {
+        Text("Для переводчика остановите Preview: Bluetooth HFP может прервать поток камеры.")
+      }
+      if !ai.transcript.isEmpty { Text(ai.transcript).lineLimit(4) }
+      if !ai.routeDescription.isEmpty { Text(ai.routeDescription).lineLimit(2) }
+    }
+    .font(.system(size: 12))
+    .foregroundStyle(.white)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(10)
+    .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
   }
 
   /// In-session toolbar (Preview / Photo / Record / Mic), kept laid out so the
@@ -363,7 +413,7 @@ struct CameraView: View {
     if previewIsActive {
       return viewModel.isRecording || viewModel.isBusy
     }
-    return !viewModel.isSessionActive || viewModel.isBusy
+    return !viewModel.isSessionActive || viewModel.isBusy || ai.isTranslating
   }
 
   /// The single full-width session button: Start Session, or End Session
@@ -388,7 +438,7 @@ struct CameraView: View {
   /// cascades the stop, so only an in-flight transition disables it.
   private var primaryDisabled: Bool {
     if viewModel.hasSession {
-      return viewModel.isBusy
+      return viewModel.isBusy || ai.isTranslating
     }
     return viewModel.isBusy || !viewModel.hasActiveDevice
   }

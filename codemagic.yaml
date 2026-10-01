@@ -4,6 +4,13 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 60
 
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
     environment:
       xcode: 26.4
 
@@ -35,9 +42,9 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM="" \
-            CURRENT_PROJECT_VERSION=2
+            CURRENT_PROJECT_VERSION=3
 
-      - name: Verify packaged transport configuration (BT1)
+      - name: Verify packaged transport configuration and AI build
         script: |
           set -euo pipefail
           python3 - <<'PY'
@@ -59,7 +66,8 @@ workflows:
               "Bluetooth peripheral": "bluetooth-peripheral" in modes,
               "Local network description": bool(info.get("NSLocalNetworkUsageDescription")),
               "Bonjour protocol": "_bonjour._tcp" in info.get("NSBonjourServices", []),
-              "BT1 diagnostic build": info.get("CameraAccessDiagnosticBuild") == "BT1",
+              "AI1 diagnostic build": info.get("CameraAccessDiagnosticBuild") == "AI1",
+              "Build 3": info.get("CFBundleVersion") == "3",
           }
           failed = [name for name, ok in checks.items() if not ok]
           if failed:
@@ -67,7 +75,7 @@ workflows:
           commit = subprocess.check_output(
               ["git", "rev-parse", "HEAD"], cwd=root, text=True
           ).strip()
-          report = "CameraAccess BT1\nCommit: " + commit + "\n"
+          report = "CameraAccess AI1\nCommit: " + commit + "\n"
           report += "\n".join(name + ": OK" for name in checks) + "\n"
           artifacts = root / "artifacts"
           artifacts.mkdir(exist_ok=True)
