@@ -435,6 +435,7 @@ final class CameraAIViewModel {
         Task { @MainActor [weak self] in
           guard let self, self.isTranslating else { return }
           self.routeDescription = Self.audioRouteDescription()
+          self.stopTranslationResources()
           self.status = "error: Bluetooth HFP microphone is unavailable"
         }
       }
@@ -597,6 +598,7 @@ final class CameraAIViewModel {
       if isTranslating { status = "listening" }
     case .audio(let data, let mimeType):
       do {
+        routeDescription = Self.audioRouteDescription()
         try audioOutput.play(data: data, mimeType: mimeType)
         hasReceivedAudio = true
         status = "speaking"
