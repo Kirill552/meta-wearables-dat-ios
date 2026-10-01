@@ -18,6 +18,7 @@
 import ExternalAccessory
 import Foundation
 import MWDATCore
+import Observation
 import SwiftUI
 import UIKit
 
@@ -35,6 +36,7 @@ struct CameraAccessApp: App {
   #endif
   private let wearables: WearablesInterface
   @State private var wearablesViewModel: WearablesViewModel
+  @State private var voiceLaunch: VoiceLaunchCoordinator
 
   init() {
     do {
@@ -65,13 +67,15 @@ struct CameraAccessApp: App {
     let wearables = Wearables.shared
     self.wearables = wearables
     self._wearablesViewModel = State(wrappedValue: WearablesViewModel(wearables: wearables))
+    self._voiceLaunch = State(wrappedValue: VoiceLaunchCoordinator(wearables: wearables))
   }
 
   var body: some Scene {
     WindowGroup {
       // Main app view with access to the shared Wearables SDK instance
       // The Wearables.shared singleton provides the core DAT API
-      MainAppView(wearables: Wearables.shared, viewModel: wearablesViewModel)
+      MainAppView(wearables: Wearables.shared, viewModel: wearablesViewModel, voiceLaunch: voiceLaunch)
+        .onAppear { voiceLaunch.start() }
         // Show error alerts for view model failures
         .alert("Something went wrong", isPresented: $wearablesViewModel.showError) {
           Button("OK") {
@@ -98,6 +102,116 @@ struct CameraAccessApp: App {
 
       // Registration view handles the flow for connecting to the glasses via Meta AI
       RegistrationView(viewModel: wearablesViewModel)
+    }
+  }
+}
+
+/// Listens at app scope so a cold "Hey Meta, start OpenVision" launch can reach
+/// the camera screen without an existing camera session or preview.
+@Observable
+@MainActor
+final class VoiceLaunchCoordinator {
+  private(set) var pendingLaunch = false
+  private(set) var status = "waiting for glasses"
+
+  @ObservationIgnored private let wearables: WearablesInterface
+  @ObservationIgnored private var stream: VoiceInvocationsStream?
+  @ObservationIgnored private var invocationToken: (any AnyListenerToken)?
+  @ObservationIgnored private var errorToken: (any AnyListenerToken)?
+  @ObservationIgnored private var linkTokens: [DeviceIdentifier: any AnyListenerToken] = [:]
+  @ObservationIgnored private var deviceTask: Task<Void, Never>?
+  @ObservationIgnored private var registrationTask: Task<Void, Never>?
+  @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+  @ObservationIgnored private var listeningOn: DeviceIdentifier?
+
+  init(wearables: WearablesInterface) {
+    self.wearables = wearables
+  }
+
+  func start() {
+    guard deviceTask == nil else { return }
+    deviceTask = Task { [weak self] in
+      guard let self else { return }
+      await self.updateDevices(self.wearables.devices)
+      for await identifiers in self.wearables.devicesStream() {
+        await self.updateDevices(identifiers)
+      }
+    }
+    registrationTask = Task { [weak self] in
+      guard let self else { return }
+      self.ensureListening()
+      for await _ in self.wearables.registrationStateStream() {
+        self.ensureListening()
+      }
+    }
+  }
+
+  func consumePendingLaunch() -> Bool {
+    guard pendingLaunch else { return false }
+    pendingLaunch = false
+    return true
+  }
+
+  private func updateDevices(_ identifiers: [DeviceIdentifier]) async {
+    for token in linkTokens.values { await token.cancel() }
+    linkTokens.removeAll()
+    for identifier in identifiers {
+      guard let device = wearables.deviceForIdentifier(identifier) else { continue }
+      linkTokens[identifier] = device.addLinkStateListener { [weak self] _ in
+        Task { @MainActor [weak self] in self?.ensureListening() }
+      }
+    }
+    ensureListening()
+  }
+
+  private func ensureListening() {
+    guard case .registered = wearables.registrationState else {
+      if listeningOn != nil { stream?.stop() }
+      listeningOn = nil
+      status = "waiting for registration"
+      return
+    }
+    if stream == nil {
+      do {
+        let newStream = try VoiceInvocationsStream(wearables: wearables)
+        invocationToken = newStream.invocationsPublisher.listen { [weak self] invocation in
+          guard let launch = invocation as? LaunchApp else { return }
+          Task { @MainActor [weak self] in
+            _ = await launch.responseHandle.sendSuccess(actionOutput: nil)
+            self?.pendingLaunch = true
+          }
+        }
+        errorToken = newStream.errorPublisher.listen { [weak self] _ in
+          Task { @MainActor [weak self] in self?.scheduleReconnect() }
+        }
+        stream = newStream
+      } catch {
+        status = "voice channel unavailable"
+        return
+      }
+    }
+    guard listeningOn == nil else { return }
+    for identifier in wearables.devices {
+      do {
+        try stream?.start(deviceIdentifier: identifier)
+        listeningOn = identifier
+        status = "voice ready"
+        return
+      } catch {
+        status = "waiting for glasses link"
+      }
+    }
+  }
+
+  private func scheduleReconnect() {
+    stream?.stop()
+    listeningOn = nil
+    status = "reconnecting voice"
+    reconnectTask?.cancel()
+    reconnectTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(700))
+      guard !Task.isCancelled else { return }
+      self?.ensureListening()
     }
   }
 }

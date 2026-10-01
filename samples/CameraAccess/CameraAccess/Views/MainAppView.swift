@@ -20,10 +20,11 @@ import SwiftUI
 struct MainAppView: View {
   let wearables: WearablesInterface
   var viewModel: WearablesViewModel
+  var voiceLaunch: VoiceLaunchCoordinator
 
   var body: some View {
     if viewModel.registrationState == .registered {
-      CameraView(wearables: wearables, wearablesVM: viewModel)
+      CameraView(wearables: wearables, wearablesVM: viewModel, voiceLaunch: voiceLaunch)
     } else {
       // User not registered - show registration/onboarding flow
       HomeScreenView(viewModel: viewModel)

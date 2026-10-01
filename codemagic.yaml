@@ -42,7 +42,7 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM="" \
-            CURRENT_PROJECT_VERSION=5
+            CURRENT_PROJECT_VERSION=6
 
       - name: Verify packaged transport configuration and AI build
         script: |
@@ -66,8 +66,8 @@ workflows:
               "Bluetooth peripheral": "bluetooth-peripheral" in modes,
               "Local network description": bool(info.get("NSLocalNetworkUsageDescription")),
               "Bonjour protocol": "_bonjour._tcp" in info.get("NSBonjourServices", []),
-              "AI3 diagnostic build": info.get("CameraAccessDiagnosticBuild") == "AI3",
-              "Build 5": info.get("CFBundleVersion") == "5",
+              "AI4 diagnostic build": info.get("CameraAccessDiagnosticBuild") == "AI4",
+              "Build 6": info.get("CFBundleVersion") == "6",
           }
           failed = [name for name, ok in checks.items() if not ok]
           if failed:
@@ -75,7 +75,7 @@ workflows:
           commit = subprocess.check_output(
               ["git", "rev-parse", "HEAD"], cwd=root, text=True
           ).strip()
-          report = "CameraAccess AI3\nCommit: " + commit + "\n"
+          report = "CameraAccess AI4\nCommit: " + commit + "\n"
           report += "\n".join(name + ": OK" for name in checks) + "\n"
           artifacts = root / "artifacts"
           artifacts.mkdir(exist_ok=True)

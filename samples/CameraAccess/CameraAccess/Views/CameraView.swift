@@ -25,14 +25,16 @@ struct CameraView: View {
   @State private var viewModel: CameraViewModel
   @State private var ai = CameraAIViewModel()
   @Bindable var wearablesVM: WearablesViewModel
+  var voiceLaunch: VoiceLaunchCoordinator
   @State private var showSettingsMenu: Bool = false
   @State private var isLaunchingUpdate: Bool = false
   @State private var showAISettings = false
   @State private var pendingVisionRequest = false
 
-  init(wearables: WearablesInterface, wearablesVM: WearablesViewModel) {
+  init(wearables: WearablesInterface, wearablesVM: WearablesViewModel, voiceLaunch: VoiceLaunchCoordinator) {
     self._viewModel = State(wrappedValue: CameraViewModel(wearables: wearables))
     self._wearablesVM = Bindable(wearablesVM)
+    self.voiceLaunch = voiceLaunch
   }
 
   private var isUpdateRequired: Bool {
@@ -107,6 +109,10 @@ struct CameraView: View {
     }
     .navigationBarHidden(true)
     .sheet(isPresented: $showAISettings) { CameraAISettingsView() }
+    .onAppear { handleVoiceLaunch() }
+    .onChange(of: voiceLaunch.pendingLaunch) { _, pending in
+      if pending { handleVoiceLaunch() }
+    }
     .onChange(of: viewModel.isSessionActive) { _, active in
       if !active { Task { await ai.stopTranslation() } }
       if active { continueVisionRequest() }
@@ -118,7 +124,7 @@ struct CameraView: View {
       if streaming { continueVisionRequest() }
     }
     .onChange(of: viewModel.hasActiveDevice) { _, available in
-      if !available { pendingVisionRequest = false }
+      if available { continueVisionRequest() }
     }
     .onChange(of: viewModel.showError) { _, hasError in
       if hasError { pendingVisionRequest = false }
@@ -372,8 +378,7 @@ struct CameraView: View {
   private func continueVisionRequest() {
     guard pendingVisionRequest else { return }
     guard viewModel.hasActiveDevice else {
-      pendingVisionRequest = false
-      ai.status = "error: glasses are unavailable"
+      ai.status = "waiting for glasses"
       return
     }
     if viewModel.isStreaming, viewModel.hasReceivedFirstFrame,
@@ -386,6 +391,13 @@ struct CameraView: View {
     } else if viewModel.isSessionActive && !viewModel.hasStream {
       Task { await viewModel.startStreaming() }
     }
+  }
+
+  private func handleVoiceLaunch() {
+    guard voiceLaunch.consumePendingLaunch() else { return }
+    pendingVisionRequest = true
+    ai.status = "connecting glasses"
+    continueVisionRequest()
   }
 
   /// In-session toolbar (Preview / Photo / Record / Mic), kept laid out so the
