@@ -28,6 +28,7 @@ struct CameraView: View {
   @State private var showSettingsMenu: Bool = false
   @State private var isLaunchingUpdate: Bool = false
   @State private var showAISettings = false
+  @State private var pendingVisionRequest = false
 
   init(wearables: WearablesInterface, wearablesVM: WearablesViewModel) {
     self._viewModel = State(wrappedValue: CameraViewModel(wearables: wearables))
@@ -108,8 +109,24 @@ struct CameraView: View {
     .sheet(isPresented: $showAISettings) { CameraAISettingsView() }
     .onChange(of: viewModel.isSessionActive) { _, active in
       if !active { Task { await ai.stopTranslation() } }
+      if active { continueVisionRequest() }
     }
-    .onDisappear { Task { await ai.stopTranslation() } }
+    .onChange(of: viewModel.hasReceivedFirstFrame) { _, hasFrame in
+      if hasFrame { continueVisionRequest() }
+    }
+    .onChange(of: viewModel.isStreaming) { _, streaming in
+      if streaming { continueVisionRequest() }
+    }
+    .onChange(of: viewModel.hasActiveDevice) { _, available in
+      if !available { pendingVisionRequest = false }
+    }
+    .onChange(of: viewModel.showError) { _, hasError in
+      if hasError { pendingVisionRequest = false }
+    }
+    .onDisappear {
+      pendingVisionRequest = false
+      Task { await ai.stopTranslation() }
+    }
   }
 
   // MARK: - Preview background
@@ -291,7 +308,7 @@ struct CameraView: View {
 
   private var bottomBar: some View {
     VStack(spacing: 14) {
-      if viewModel.isSessionActive {
+      if viewModel.hasActiveDevice && !isUpdateRequired {
         aiControls
       }
       if isUpdateRequired {
@@ -317,10 +334,11 @@ struct CameraView: View {
     VStack(alignment: .leading, spacing: 6) {
       HStack(spacing: 10) {
         Button("Что я вижу?") {
-          guard let frame = viewModel.currentVideoFrame else { return }
-          Task { await ai.ask(frame: frame) }
+          pendingVisionRequest = true
+          ai.status = "connecting glasses"
+          continueVisionRequest()
         }
-        .disabled(!viewModel.isStreaming || !viewModel.hasReceivedFirstFrame || ai.isBusy || ai.isTranslating)
+        .disabled(pendingVisionRequest || viewModel.isBusy || ai.isBusy || ai.isTranslating)
         .accessibilityIdentifier("ai_vision_button")
 
         Button(ai.isTranslating ? "Переводчик: Стоп" : "Переводчик: Старт") {
@@ -329,7 +347,7 @@ struct CameraView: View {
             else { await ai.startTranslation() }
           }
         }
-        .disabled(ai.isBusy || (!ai.isTranslating && viewModel.hasStream))
+        .disabled(ai.isBusy || !viewModel.isSessionActive || (!ai.isTranslating && viewModel.hasStream))
         .accessibilityIdentifier("ai_translation_button")
       }
       .buttonStyle(.borderedProminent)
@@ -347,6 +365,27 @@ struct CameraView: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(10)
     .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+  }
+
+  /// A single tap advances through the existing DAT session and camera lifecycle.
+  /// Camera permission still uses the app's explicit Meta AI confirmation flow.
+  private func continueVisionRequest() {
+    guard pendingVisionRequest else { return }
+    guard viewModel.hasActiveDevice else {
+      pendingVisionRequest = false
+      ai.status = "error: glasses are unavailable"
+      return
+    }
+    if viewModel.isStreaming, viewModel.hasReceivedFirstFrame,
+       let frame = viewModel.currentVideoFrame
+    {
+      pendingVisionRequest = false
+      Task { await ai.ask(frame: frame) }
+    } else if !viewModel.hasSession {
+      viewModel.startSession()
+    } else if viewModel.isSessionActive && !viewModel.hasStream {
+      Task { await viewModel.startStreaming() }
+    }
   }
 
   /// In-session toolbar (Preview / Photo / Record / Mic), kept laid out so the
