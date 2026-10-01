@@ -80,6 +80,7 @@ private final class CameraAILiveSession {
   private var setupTimeoutTask: Task<Void, Never>?
   private var responseTimeoutTask: Task<Void, Never>?
   private var responseTranscript = ""
+  private var suppressResponseEvents = false
   private var isClosing = false
 
   init(
@@ -138,22 +139,16 @@ private final class CameraAILiveSession {
     guard socket != nil else { throw CameraAIServiceError.liveConnection }
     responseTranscript = ""
 
-    // The raw WebSocket guide represents a still image as one realtimeInput.video
-    // Blob. Send exactly one frame, then a clientContent text turn that starts the
-    // response; no continuous frame task is created.
-    let videoMessage: [String: Any] = [
-      "realtimeInput": [
-        "video": [
-          "mimeType": "image/jpeg",
-          "data": jpegData.base64EncodedString(),
-        ],
-      ],
-    ]
+    // Keep the still image and its question in one Content turn. Live API does
+    // not guarantee ordering across realtimeInput and clientContent streams.
     let textMessage: [String: Any] = [
       "clientContent": [
         "turns": [[
           "role": "user",
-          "parts": [["text": text]],
+          "parts": [
+            ["inlineData": ["mimeType": "image/jpeg", "data": jpegData.base64EncodedString()]],
+            ["text": text],
+          ],
         ]],
         "turnComplete": true,
       ],
@@ -169,11 +164,37 @@ private final class CameraAILiveSession {
       Task { @MainActor [weak self] in
         do {
           guard let self else { throw CameraAIServiceError.liveConnection }
-          try await self.sendJSON(videoMessage)
           try await self.sendJSON(textMessage)
         } catch {
           self?.finishResponse(with: .failure(CameraAIServiceError.liveResponse))
         }
+      }
+    }
+  }
+
+  func primeTranslation() async throws {
+    responseTranscript = ""
+    suppressResponseEvents = true
+    let message: [String: Any] = [
+      "clientContent": [
+        "turns": [[
+          "role": "user",
+          "parts": [["text": "For every following spoken utterance in English, Sinhala or Tamil, output only its Russian translation. Never answer the speaker or add comments. Example: 'Hello, my name is Kirill' becomes 'Здравствуйте, меня зовут Кирилл'. Confirm this instruction briefly, then translate all subsequent speech."]],
+        ]],
+        "turnComplete": true,
+      ],
+    ]
+    defer { suppressResponseEvents = false; responseTranscript = "" }
+    _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CameraAILiveResponse, Error>) in
+      responseContinuation = continuation
+      responseTimeoutTask = Task { @MainActor [weak self] in
+        try? await Task.sleep(for: .seconds(30))
+        guard !Task.isCancelled else { return }
+        self?.finishResponse(with: .failure(CameraAIServiceError.timedOut))
+      }
+      Task { @MainActor [weak self] in
+        do { try await self?.sendJSON(message) }
+        catch { self?.finishResponse(with: .failure(CameraAIServiceError.liveResponse)) }
       }
     }
   }
@@ -281,7 +302,7 @@ private final class CameraAILiveSession {
        let text = output["text"] as? String,
        !text.isEmpty {
       responseTranscript += text
-      onEvent(.outputText(text))
+      if !suppressResponseEvents { onEvent(.outputText(text)) }
     }
 
     if let modelTurn = serverContent["modelTurn"] as? [String: Any],
@@ -289,12 +310,12 @@ private final class CameraAILiveSession {
       for part in parts {
         if let text = part["text"] as? String, !text.isEmpty {
           responseTranscript += text
-          onEvent(.outputText(text))
+          if !suppressResponseEvents { onEvent(.outputText(text)) }
         }
         if let inlineData = part["inlineData"] as? [String: Any],
            let encoded = inlineData["data"] as? String,
            let audio = Data(base64Encoded: encoded) {
-          onEvent(.audio(audio, mimeType: inlineData["mimeType"] as? String ?? "audio/pcm;rate=24000"))
+          if !suppressResponseEvents { onEvent(.audio(audio, mimeType: inlineData["mimeType"] as? String ?? "audio/pcm;rate=24000")) }
         }
       }
     }
@@ -304,7 +325,7 @@ private final class CameraAILiveSession {
     }
 
     if (serverContent["turnComplete"] as? Bool) == true {
-      onEvent(.turnComplete)
+      if !suppressResponseEvents { onEvent(.turnComplete) }
       finishResponse(with: .success(CameraAILiveResponse(transcript: responseTranscript)))
     }
   }
@@ -413,6 +434,7 @@ final class CameraAIViewModel {
   @ObservationIgnored private var liveSession: CameraAILiveSession?
   @ObservationIgnored private var hasMicrophoneFrames = false
   @ObservationIgnored private var hasReceivedAudio = false
+  @ObservationIgnored private var currentTurnTranscript = ""
 
   init() {
     status = Self.hasConfiguration ? "connected" : "gateway not configured"
@@ -463,6 +485,7 @@ final class CameraAIViewModel {
     isBusy = true
     transcript = ""
     hasReceivedAudio = false
+    currentTurnTranscript = ""
     status = "requesting token"
     do {
       let token = try await requestEphemeralToken()
@@ -513,6 +536,8 @@ final class CameraAIViewModel {
     isBusy = true
     transcript = ""
     hasMicrophoneFrames = false
+    hasReceivedAudio = false
+    currentTurnTranscript = ""
     status = "requesting token"
     do {
       try configureAudioSession()
@@ -528,6 +553,8 @@ final class CameraAIViewModel {
       )
       liveSession = session
       try await session.connect()
+      status = "preparing translator"
+      try await session.primeTranslation()
       audioInput.setup()
       audioInput.setupInput()
       audioInput.startListening()
@@ -592,6 +619,7 @@ final class CameraAIViewModel {
       status = isTranslating ? "listening" : "connected"
     case .outputText(let text):
       transcript += text
+      currentTurnTranscript += text
       status = "speaking"
     case .inputText:
       if isTranslating { status = "listening" }
@@ -606,6 +634,13 @@ final class CameraAIViewModel {
       }
     case .turnComplete:
       if isTranslating {
+        if !hasReceivedAudio && !currentTurnTranscript.isEmpty {
+          let utterance = AVSpeechUtterance(string: currentTurnTranscript)
+          utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
+          speechSynthesizer.speak(utterance)
+        }
+        currentTurnTranscript = ""
+        hasReceivedAudio = false
         status = "listening"
       } else if !hasReceivedAudio, !transcript.isEmpty {
         let utterance = AVSpeechUtterance(string: transcript)

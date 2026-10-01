@@ -34,7 +34,7 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>CameraAccessDiagnosticBuild</key>
-	<string>AI5</string>
+	<string>AI6</string>
 	<!-- Begin required section for Device Access Toolkit Apps -->
 	<!-- Meta Wearables Device Access Toolkit Setup -->
 	<key>MWDAT</key>

@@ -254,6 +254,7 @@ struct CameraView: View {
       VStack(alignment: .leading, spacing: 6) {
         statusChip(label: "Session", value: viewModel.sessionStateText, active: viewModel.isSessionActive, present: viewModel.hasSession)
         statusChip(label: "Stream", value: viewModel.streamStateText, active: viewModel.isStreaming, present: viewModel.hasStream)
+        statusChip(label: "Voice", value: voiceLaunch.status, active: voiceLaunch.status == "voice ready", present: true)
       }
 
       Spacer()
