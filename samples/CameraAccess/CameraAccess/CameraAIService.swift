@@ -435,14 +435,18 @@ final class CameraAIViewModel {
   @ObservationIgnored private var hasMicrophoneFrames = false
   @ObservationIgnored private var hasReceivedAudio = false
   @ObservationIgnored private var currentTurnTranscript = ""
+  @ObservationIgnored private var isSpeakingTranslation = false
+  @ObservationIgnored private var speechTurn = 0
 
   init() {
     status = Self.hasConfiguration ? "connected" : "gateway not configured"
     routeDescription = Self.audioRouteDescription()
+    speechSynthesizer.usesApplicationAudioSession = true
     audioInput.setCallbacks(
       onAudioBuffer: { [weak self] audioData, numSamples, format in
         Task { @MainActor [weak self] in
-          guard let self, self.isTranslating, let session = self.liveSession else { return }
+          guard let self, self.isTranslating, !self.isSpeakingTranslation,
+                let session = self.liveSession else { return }
           let pcm = Self.makePCM16k(audioData, sampleRate: format.mSampleRate, sampleCount: numSamples)
           if !pcm.isEmpty && !self.hasMicrophoneFrames {
             self.hasMicrophoneFrames = true
@@ -486,6 +490,7 @@ final class CameraAIViewModel {
     transcript = ""
     hasReceivedAudio = false
     currentTurnTranscript = ""
+    isSpeakingTranslation = false
     status = "requesting token"
     do {
       let token = try await requestEphemeralToken()
@@ -538,6 +543,7 @@ final class CameraAIViewModel {
     hasMicrophoneFrames = false
     hasReceivedAudio = false
     currentTurnTranscript = ""
+    isSpeakingTranslation = false
     status = "requesting token"
     do {
       try configureAudioSession()
@@ -624,6 +630,10 @@ final class CameraAIViewModel {
     case .inputText:
       if isTranslating { status = "listening" }
     case .audio(let data, let mimeType):
+      // During translation use the Russian output transcript for local speech.
+      // The Live audio buffers can be accepted by AVAudioEngine while remaining
+      // inaudible on the simultaneous Bluetooth HFP input/output route.
+      if isTranslating { break }
       do {
         routeDescription = Self.audioRouteDescription()
         try audioOutput.play(data: data, mimeType: mimeType)
@@ -634,14 +644,30 @@ final class CameraAIViewModel {
       }
     case .turnComplete:
       if isTranslating {
-        if !hasReceivedAudio && !currentTurnTranscript.isEmpty {
+        if !currentTurnTranscript.isEmpty {
           let utterance = AVSpeechUtterance(string: currentTurnTranscript)
           utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
+          isSpeakingTranslation = true
+          speechTurn += 1
+          let turn = speechTurn
           speechSynthesizer.speak(utterance)
+          status = "speaking (iOS voice)"
+          Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self else { return }
+            while self.isTranslating && self.speechTurn == turn && self.speechSynthesizer.isSpeaking {
+              try? await Task.sleep(for: .milliseconds(150))
+            }
+            if self.isTranslating && self.speechTurn == turn {
+              self.isSpeakingTranslation = false
+              self.status = "listening"
+            }
+          }
+        } else {
+          status = "listening"
         }
         currentTurnTranscript = ""
         hasReceivedAudio = false
-        status = "listening"
       } else if !hasReceivedAudio, !transcript.isEmpty {
         let utterance = AVSpeechUtterance(string: transcript)
         utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
@@ -658,7 +684,7 @@ final class CameraAIViewModel {
   private func configureAudioSession() throws {
     let session = AVAudioSession.sharedInstance()
     do {
-      try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .mixWithOthers])
+      try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
       try session.setActive(true)
       if let bluetoothInput = session.availableInputs?.first(where: { $0.portType == .bluetoothHFP }) {
         try session.setPreferredInput(bluetoothInput)
@@ -670,9 +696,12 @@ final class CameraAIViewModel {
 
   private func stopTranslationResources() {
     isTranslating = false
+    isSpeakingTranslation = false
+    speechTurn += 1
     audioInput.stopListening()
     audioInput.cleanup()
     audioOutput.stop()
+    speechSynthesizer.stopSpeaking(at: .immediate)
     liveSession?.close()
     liveSession = nil
   }

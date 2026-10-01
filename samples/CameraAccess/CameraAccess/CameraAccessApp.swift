@@ -76,6 +76,14 @@ struct CameraAccessApp: App {
       // The Wearables.shared singleton provides the core DAT API
       MainAppView(wearables: Wearables.shared, viewModel: wearablesViewModel, voiceLaunch: voiceLaunch)
         .onAppear { voiceLaunch.start() }
+        .onOpenURL { url in
+          // A Shortcuts "Open URLs" action can invoke the same one-shot camera
+          // flow when Meta AI cannot resolve the app's spoken name.
+          if url.scheme?.lowercased() == "cameraaccess", url.host?.lowercased() == "ask",
+             url.path.isEmpty || url.path == "/" {
+            voiceLaunch.requestVision()
+          }
+        }
         // Show error alerts for view model failures
         .alert("Something went wrong", isPresented: $wearablesViewModel.showError) {
           Button("OK") {
@@ -150,6 +158,10 @@ final class VoiceLaunchCoordinator {
     guard pendingLaunch else { return false }
     pendingLaunch = false
     return true
+  }
+
+  func requestVision() {
+    pendingLaunch = true
   }
 
   private func updateDevices(_ identifiers: [DeviceIdentifier]) async {
